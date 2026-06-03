@@ -10,101 +10,133 @@
 
 ## 1. 모티베이션 & 인트로
 
-본 프로젝트의 목표는 18개 기지국에서 측정된 RTT 기반 거리값을 이용하여 사용자 위치를 추정하는 것이다. 제공 데이터는 정답 사용자 위치, 기지국별 RTT 측정값, 기지국 좌표로 구성되어 있으며, 채점 시에는 학생에게 공개되지 않은 hidden test set으로 main.py가 평가된다. 따라서 제공된 데이터에만 과하게 맞춘 단순 memorization 방식보다는, 측정값의 구조와 오차 원인을 반영하는 일반화 가능한 알고리즘이 필요하다.
+본 프로젝트의 목표는 18개 기지국에서 측정된 RTT 기반 거리값을 이용하여 사용자의 2차원 위치를 추정하는 것이다. 입력 데이터는 사용자별 거리 측정값 d_hat과 기지국 좌표 BS_positions로 구성되어 있으며, 학습 과정에서는 정답 좌표 p를 이용해 모델을 만들 수 있다. 그러나 실제 추정 단계에서는 정답 좌표를 사용할 수 없기 때문에, 단순히 학습 데이터의 좌표를 외우는 방식보다 거리 측정값의 구조와 오차 특성을 함께 반영하는 방식이 더 적합하다고 판단하였다.
 
-사전 분석에서 가장 중요하게 확인한 점은 d_hat이 실제 기하학적 거리와 완전히 일치하지 않는다는 것이다. 일부 측정값은 실제 거리보다 크게 나타나는 양의 bias를 보였고, 특정 사용자와 anchor 조합에서는 큰 outlier가 존재하였다. 이런 상황에서 모든 anchor를 동일하게 사용하는 일반 최소제곱법은 신뢰도가 낮은 측정값 하나 때문에 위치 추정 결과가 크게 흔들릴 수 있다. 따라서 본 실험에서는 거리 측정값을 그대로 좌표 회귀에 넣는 방식뿐 아니라, anchor별 측정 신뢰도 예측, 다중 WLS 후보 생성, 모델 ensemble을 함께 사용하는 구조를 설계하였다.
+중간 발표 단계에서는 Random Forest로 관측값의 신뢰도를 예측하고, 그 신뢰도를 WLS에 반영하는 방향을 중심으로 실험을 진행하였다. 당시에는 평균, 중앙값, 분산과 같은 통계량을 이용해 각 관측값이 얼마나 안정적인지를 판단하는 구조를 생각하였다. 이후 최종 데이터 구조를 기준으로 다시 정리하면서, 개별 관측의 신뢰도를 직접적인 reliability label로 두기보다는 각 anchor의 거리 오차를 예측하고, 그 예측값을 위치 후보 생성과 최종 회귀 모델의 feature로 사용하는 방식으로 확장하였다.
 
-| 분석 항목 | 확인된 의미 | 알고리즘 설계 반영 |
+사전 분석에서 가장 중요하게 확인한 점은 d_hat이 실제 기하학적 거리와 항상 일치하지 않는다는 점이었다. 어떤 anchor에서는 실제 거리보다 크게 측정되는 양의 bias가 반복적으로 나타났고, 일부 사용자와 anchor 조합에서는 다른 측정값에 비해 큰 outlier가 포함되어 있었다. 이 상황에서 모든 anchor를 같은 정도로 신뢰하면, 오차가 큰 anchor 하나가 전체 위치 추정 결과를 크게 흔들 수 있다. 그래서 본 알고리즘은 모든 측정값을 무조건 동일하게 사용하는 대신, anchor별 예상 오차를 먼저 추정하고 여러 개의 WLS 기반 위치 후보를 만든 뒤, 마지막으로 서로 다른 성격의 회귀 모델을 결합하여 최종 좌표를 예측하도록 설계하였다.
+
+| 관찰 내용 | 의미 | 최종 설계에 반영한 방식 |
 |---|---|---|
-| anchor별 거리 오차 차이 | 모든 기지국이 같은 신뢰도를 갖지 않음 | anchor error prediction model 추가 |
-| 일부 d_hat의 큰 outlier | 단일 WLS 결과가 특정 측정값에 끌릴 수 있음 | top-k anchor subset 기반 다중 WLS 후보 생성 |
-| 거리 순위와 위치의 관계 | 절대 거리값뿐 아니라 anchor 간 상대적 순서가 위치 정보를 가짐 | rank feature, pairwise distance difference feature 추가 |
-| tree 계열과 선형 모델의 장단점 차이 | tree 모델은 비선형 패턴에 강하고 선형 모델은 안정적임 | Ridge, ExtraTrees, GradientBoosting ensemble 사용 |
-| hidden test overfitting 위험 | 훈련 데이터에만 맞는 복잡한 단일 모델은 위험 | 여러 모델 비교 후 compact ensemble만 저장 |
+| anchor별 오차 크기가 일정하지 않음 | 같은 RTT 값이라도 anchor 위치와 사용자 위치에 따라 신뢰도가 달라질 수 있음 | anchor error prediction model을 두어 각 anchor의 예상 거리 오차를 추정 |
+| 일부 측정값에서 큰 outlier가 발생 | 전체 anchor를 한 번에 사용하는 WLS가 특정 anchor에 끌릴 수 있음 | predicted error top-k, distance top-k 기반의 여러 WLS 후보 생성 |
+| 거리의 절대값만으로는 위치 관계를 충분히 설명하기 어려움 | 가까운 anchor의 순서나 anchor 간 거리 차이도 위치 정보를 포함함 | rank feature, pairwise distance difference feature 추가 |
+| 단일 모델마다 장단점이 다름 | 선형 모델은 안정적이고, tree 모델은 비선형 패턴을 잘 잡음 | Ridge, Extra Trees, Gradient Boosting을 결합한 ensemble 사용 |
+| validation 결과가 모델마다 다른 양상을 보임 | 평균 오차, 중앙값 오차, 큰 오차를 동시에 고려해야 함 | RMSE뿐 아니라 MAE, Median error, m90, Max error를 함께 확인 |
+
+최종 알고리즘은 단순한 삼각측량이나 단일 머신러닝 회귀 모델이 아니라, 기하학 기반 위치 후보와 데이터 기반 회귀 모델을 함께 사용하는 하이브리드 구조이다. WLS는 RTT 측정값과 anchor 좌표 사이의 물리적 관계를 반영할 수 있고, ensemble 회귀 모델은 실제 데이터에 포함된 bias와 비선형 오차 패턴을 보정할 수 있다. 따라서 본 방법의 핵심은 “anchor 측정값의 신뢰도 차이를 먼저 반영하고, 여러 후보 위치를 비교할 수 있는 feature를 만든 뒤, 최종 좌표를 안정적으로 선택하는 것”이다.
 
 ## 2. 알고리즘 설명
 
-최종 알고리즘은 하나의 회귀 모델만 사용하는 방식이 아니라, 측정값의 신뢰도를 먼저 예측하고 그 정보를 이용해 여러 위치 후보를 만든 뒤, 서로 다른 성격의 모델을 결합하여 최종 좌표를 예측하는 방식이다. 전체 구조는 anchor error prediction, feature construction, multi-candidate WLS, model comparison, final ensemble의 다섯 부분으로 구성된다.
+최종 알고리즘은 크게 anchor error prediction, feature construction, multi-candidate WLS, final ensemble의 네 단계로 구성된다. 전체 흐름은 먼저 각 사용자에 대해 18개 anchor 거리값을 정리하고, anchor별 예상 오차를 계산한 뒤, 이 정보를 이용해 여러 위치 후보를 만든다. 이후 원본 거리값, 통계량, 거리 순위, anchor 간 거리 차이, WLS 후보 좌표와 residual 통계량을 하나의 feature vector로 합쳐 최종 회귀 모델에 입력한다.
 
-| 구성 요소 | 역할 | 입력 | 출력 |
+| 단계 | 역할 | 입력 | 출력 |
 |---|---|---|---|
-| Anchor error prediction | 각 anchor 측정값의 예상 오차 추정 | anchor별 d_hat, rank, 사용자별 통계, anchor 좌표 | anchor별 predicted error |
-| Multi-candidate WLS | 신뢰도 높은 anchor 조합으로 위치 후보 생성 | d_hat, predicted error, BS_positions | 여러 개의 WLS 위치 후보 |
-| Feature construction | ML 모델이 사용할 통합 feature 생성 | 원본 거리, 거리 통계, rank, pairwise difference, WLS 후보 | 사용자별 feature vector |
-| Model comparison | 여러 회귀 모델의 성능 비교 | train feature, validation feature | validation 결과표 |
-| Final ensemble | 가장 안정적인 모델 조합으로 최종 위치 예측 | feature vector | p_hat |
+| Anchor error prediction | anchor별 거리 측정 오차를 예측 | d_hat, anchor 좌표, 사용자별 거리 통계, rank | predicted anchor error |
+| Basic feature construction | 원본 거리값에서 위치 추정에 필요한 파생 feature 생성 | d_hat, BS_positions | 거리 기반 feature vector |
+| Multi-candidate WLS | 여러 anchor 조합으로 기하학적 위치 후보 생성 | d_hat, predicted error, BS_positions | WLS 후보 좌표와 residual 통계 |
+| Final ensemble regression | 여러 회귀 모델의 예측을 가중 평균하여 최종 좌표 계산 | 전체 feature vector | 예측 위치 p_hat |
 
-Anchor error prediction은 각 anchor의 측정값이 실제 거리와 얼마나 다를 가능성이 있는지를 학습한다. 학습 데이터에서는 정답 위치 p와 기지국 좌표 BS_positions를 이용해 실제 거리 d_true를 계산할 수 있으므로, anchor별 target error를 |d_hat - d_true|로 정의한다. 이 모델은 위치를 직접 예측하는 것이 아니라, 어떤 anchor가 현재 사용자에 대해 신뢰도가 낮을 가능성이 큰지를 판단하는 보조 모델이다.
+Anchor error prediction은 최종 좌표를 바로 예측하는 모델이 아니라, 각 anchor 측정값이 실제 거리에서 얼마나 벗어날 가능성이 있는지를 예측하는 보조 모델이다. 학습 데이터에서는 정답 위치 p와 anchor 좌표 a_i를 알고 있으므로, i번째 anchor의 실제 거리는 다음과 같이 계산할 수 있다.
 
 | 기호 | 의미 |
 |---|---|
-| d_i | i번째 anchor의 RTT 기반 측정값 |
+| p | 사용자 실제 위치 |
 | a_i | i번째 anchor의 좌표 |
-| p | 사용자 위치 |
+| d_i | i번째 anchor의 측정 거리 |
 | d_true,i | 사용자와 i번째 anchor 사이의 실제 거리 |
-| e_i | anchor별 거리 오차 |
-| w_i | predicted error에서 변환한 anchor 신뢰도 가중치 |
+| e_i | i번째 anchor의 거리 측정 오차 |
 
-Anchor별 실제 거리는 d_true,i = ||p - a_i||로 계산하였다. 학습 시 anchor error model은 e_i = |d_i - d_true,i|를 예측하도록 구성하였다. 추론 시에는 정답 위치 p를 사용할 수 없기 때문에, 이 모델이 d_hat과 anchor feature만으로 predicted error를 추정한다. predicted error가 작을수록 해당 anchor를 더 신뢰할 수 있다고 보고, WLS 후보 생성에서 더 큰 가중치를 부여한다.
+| 수식 | 설명 |
+|---|---|
+| d_true,i = ||p - a_i||₂ | 정답 좌표와 anchor 좌표 사이의 실제 유클리디안 거리 |
+| e_i = |d_i - d_true,i| | 측정 거리와 실제 거리의 차이 |
 
-Multi-candidate WLS는 하나의 WLS 결과만 만드는 것이 아니라 여러 anchor subset에서 위치 후보를 만든다. 전체 anchor를 모두 사용하는 후보, predicted error가 작은 anchor만 사용하는 후보, d_hat이 작은 anchor만 사용하는 후보를 함께 생성하였다. 이렇게 한 이유는 outlier가 많은 상황에서 전체 anchor WLS 하나만 쓰면 잘못된 anchor의 영향이 크게 반영될 수 있기 때문이다.
+이때 e_i가 작으면 해당 anchor의 측정값이 실제 거리와 비교적 일치한다고 볼 수 있고, e_i가 크면 NLOS, multipath, 특정 위치에서의 bias 등으로 인해 신뢰도가 낮을 가능성이 크다. 본 알고리즘에서는 e_i를 직접 feature로 사용할 수 없기 때문에, 학습 단계에서 Extra Trees 기반 회귀 모델을 이용해 e_i를 예측하도록 하였다. 추정 단계에서는 정답 위치 p가 없으므로, d_hat의 크기, 사용자별 통계량, anchor별 rank, anchor 좌표, 다른 anchor와의 거리 차이 등을 이용해 predicted error를 계산한다.
 
-| WLS 후보 유형 | 사용 anchor 기준 | 목적 |
+예측된 error는 두 가지 방식으로 사용된다. 첫째, WLS 후보를 만들 때 predicted error가 작은 anchor를 더 신뢰할 수 있는 anchor로 보고 우선적으로 사용한다. 둘째, predicted error 자체와 그 역수 형태의 값을 최종 회귀 모델의 feature에 포함하여, 모델이 “현재 사용자에서 어떤 anchor가 상대적으로 불안정한지”를 학습할 수 있도록 한다.
+
+다음 단계는 사용자별 feature를 구성하는 과정이다. 원본 d_hat 18개만 사용하면 anchor별 거리 패턴은 반영할 수 있지만, 측정값의 분포나 상대적인 위치 관계를 충분히 표현하기 어렵다. 따라서 본 알고리즘은 다음과 같은 feature들을 함께 사용하였다.
+
+| Feature 그룹 | 포함 내용 | 사용 의도 |
 |---|---|---|
-| All-anchor reliability WLS | 전체 anchor와 predicted error 기반 weight | 전체 측정값을 사용한 기준 후보 |
-| Error top-k WLS | predicted error가 작은 anchor subset | 신뢰도 높은 측정값 중심 후보 |
-| Distance top-k WLS | d_hat이 작은 anchor subset | 가까운 anchor 중심의 지역 후보 |
-| Residual statistic feature | 각 후보 위치에서 residual 분포 계산 | 후보 위치가 전체 측정값과 얼마나 일관적인지 표현 |
+| Raw distance | 18개 anchor의 d_hat | 가장 기본적인 RTT 거리 패턴 반영 |
+| Nonlinear distance transform | log(1+d), sqrt(d), d²/100 | 거리 scale 변화에 따른 비선형 관계 보완 |
+| User-level statistics | 평균, 중앙값, 표준편차, 최솟값, 최댓값, range, 분위수 | 사용자별 측정값 분포와 outlier 정도 표현 |
+| Rank feature | 18개 anchor 거리의 상대 순위 | 절대 거리값이 흔들릴 때도 가까운 anchor 순서 보존 |
+| Top-k anchor mask | 가까운 anchor 1, 2, 3, 4, 5, 6, 8개 표시 | 어느 anchor 그룹이 사용자와 가까운지 표현 |
+| Inverse-distance center | 거리 역수 가중치를 이용한 anchor 중심 좌표 | 대략적인 위치 힌트 제공 |
+| Local anchor geometry | 가까운 k개 anchor의 좌표 평균과 분산 | 주변 anchor 배치 구조 반영 |
+| Pairwise difference | 모든 anchor 쌍의 d_i - d_j | x, y 방향성에 대한 상대 거리 정보 제공 |
+| Predicted anchor error | anchor별 예상 오차와 역수형 신뢰도 | anchor 신뢰도 차이 반영 |
+| WLS candidate | 여러 anchor subset으로 계산한 후보 좌표 | 기하학 기반 초기 위치 후보 제공 |
+| Residual statistics | 후보 위치에서의 residual 평균, 중앙값, 표준편차, 최댓값 등 | 후보 좌표가 입력 거리와 얼마나 일관적인지 표현 |
 
-최종 feature는 원본 d_hat만 사용하지 않고, 측정값의 상대적 구조와 기하학적 정보를 함께 담도록 구성하였다. 특히 pairwise distance difference는 좌우 anchor 또는 상하 anchor 사이의 거리 차이가 위치 방향성을 담는다는 점을 반영하기 위한 feature이다. rank feature는 절대 거리 scale이 흔들리더라도 상대적으로 가까운 anchor의 순서가 위치 정보를 제공할 수 있다는 점을 반영한다.
+Multi-candidate WLS는 본 알고리즘에서 중요한 부분이다. 일반적인 WLS는 모든 anchor를 사용하여 하나의 좌표를 구하지만, 측정값 중 일부에 큰 outlier가 섞이면 그 하나의 결과가 불안정해질 수 있다. 그래서 본 실험에서는 WLS 결과를 하나로 고정하지 않고, 서로 다른 anchor subset을 이용해 여러 후보 좌표를 생성하였다.
 
-| Feature 그룹 | 포함 내용 | 사용 이유 |
+| WLS 후보 유형 | anchor 선택 기준 | 목적 |
 |---|---|---|
-| Raw distance feature | d_hat 18개 | 기본 RTT 측정 패턴 반영 |
-| Nonlinear transformed distance | log(d_hat), sqrt(d_hat), squared distance scale | 거리 scale 변화와 비선형 관계 반영 |
-| User statistic feature | 평균, 중앙값, 표준편차, 최솟값, 최댓값, 분위수 | 사용자별 측정 안정성 표현 |
-| Rank feature | anchor별 거리 순위 | 절대값이 흔들려도 상대적 위치 정보 유지 |
-| Top-k anchor mask | 가까운 anchor 집합 표시 | 지역적 anchor 그룹 정보 반영 |
-| Inverse-distance center | 거리 역수 기반 anchor 중심 | 대략적 위치 힌트 제공 |
-| Pairwise difference | anchor 간 d_hat 차이 | x, y 방향성 학습 보조 |
-| Predicted anchor error | anchor별 예상 측정 오차 | 신뢰도 낮은 측정값의 영향 완화 |
-| WLS candidate position | 여러 anchor subset으로 계산한 위치 후보 | 기하학 기반 후보 정보를 ML에 제공 |
-| Candidate residual statistics | 후보별 residual 평균, 중앙값, 최댓값 등 | 후보의 일관성과 outlier 정도 표현 |
+| All-anchor reliability WLS | 18개 anchor 전체 사용, predicted error 기반 weight 적용 | 전체 측정값을 반영한 기본 후보 생성 |
+| Error top-5 WLS | predicted error가 작은 5개 anchor 사용 | 가장 신뢰도 높은 소수 anchor 기반 후보 |
+| Error top-7 WLS | predicted error가 작은 7개 anchor 사용 | 신뢰도와 anchor 수 사이의 균형 후보 |
+| Error top-9 WLS | predicted error가 작은 9개 anchor 사용 | 중간 규모의 안정적인 후보 |
+| Error top-12 WLS | predicted error가 작은 12개 anchor 사용 | outlier 일부를 줄이면서 충분한 anchor 확보 |
+| Distance top-5 WLS | 측정 거리 d_hat이 작은 5개 anchor 사용 | 가까운 anchor 중심의 지역 후보 |
+| Distance top-7 WLS | 측정 거리 d_hat이 작은 7개 anchor 사용 | 가까운 anchor를 조금 더 넓게 반영 |
+| Distance top-9 WLS | 측정 거리 d_hat이 작은 9개 anchor 사용 | 지역성과 안정성의 균형 후보 |
+| Distance top-12 WLS | 측정 거리 d_hat이 작은 12개 anchor 사용 | 가까운 anchor 중심으로 넓은 후보 생성 |
 
-최종 모델은 단일 모델 하나를 사전에 정하지 않고 여러 후보를 같은 validation split으로 비교하였다. 비교 모델에는 선형 모델, 부분최소제곱 회귀, KNN, Random Forest, Extra Trees, Gradient Boosting, 그리고 세 가지 ensemble 후보가 포함된다. 최종적으로 validation RMSE가 가장 낮은 weighted ensemble을 선택하였다.
+각 WLS 후보는 anchor 좌표와 측정 거리의 제곱 차이를 선형화하여 계산하였다. 기준 anchor를 하나 잡고, 다른 anchor와의 거리 제곱식 차이를 이용하면 위치 p에 대한 선형 방정식 형태를 만들 수 있다. predicted error를 사용하는 후보에서는 error가 작은 anchor일수록 더 큰 weight를 갖도록 하여 오차가 클 것으로 예상되는 측정값의 영향을 줄였다. 후보 좌표를 만든 뒤에는 그 좌표에서 각 anchor까지의 기하학적 거리와 실제 d_hat 사이의 차이를 residual로 계산하였다.
 
-| 최종 선택 모델 | 구성 모델 | 결합 방식 | 선택 이유 |
-|---|---|---|---|
-| ensemble_ridge_extra_gbr | Ridge alpha 50, Extra Trees 60, Gradient Boosting 60 | validation RMSE의 역수 기반 weighted average | 선형 안정성, tree 기반 비선형성, boosting의 median error 개선 효과를 함께 사용 |
+| Residual 관련 값 | 의미 |
+|---|---|
+| residual_i = ||p_candidate - a_i||₂ - d_i | 후보 좌표가 i번째 anchor 측정값과 얼마나 맞는지 |
+| mean absolute residual | 전체 anchor에 대한 평균 불일치 정도 |
+| median absolute residual | 이상치 영향을 줄여 본 일반적인 불일치 정도 |
+| max absolute residual | 가장 크게 어긋난 anchor의 오차 |
+| 75th percentile residual | residual 분포의 상위 구간 크기 |
 
-이 방식은 참고 논문에서 제안한 NLOS 식별, WLS 가중치 조정, 실내측위 feature 기반 학습 아이디어를 그대로 복사한 것이 아니라, 본 데이터에 맞게 anchor error prediction과 multi-candidate WLS feature를 구성한 점이 다르다. 참고 논문들은 UWB/RTT 측정에서 NLOS와 multipath가 거리 오차를 키울 수 있고, 신뢰도 또는 오차 완화 과정이 필요하다는 근거로 활용하였다. 본 프로젝트에서는 원시 채널 impulse response가 제공되지 않기 때문에, 대신 d_hat의 통계량, 순위, anchor geometry, WLS residual을 이용하여 신뢰도 정보를 간접적으로 구성하였다.
+최종 회귀 모델은 단일 모델 하나만 사용하지 않았다. Ridge Regression, Extra Trees, Gradient Boosting은 각각 성격이 다르기 때문에 같은 feature를 보더라도 서로 다른 방식으로 좌표를 예측한다. Ridge는 선형 모델이라 복잡한 비선형 구조를 모두 잡지는 못하지만, 과하게 흔들리지 않는 안정적인 예측을 제공한다. Extra Trees는 무작위성이 큰 tree ensemble이기 때문에 복잡한 거리 패턴과 anchor 배치에 따른 비선형 관계를 잘 반영한다. Gradient Boosting은 이전 모델이 놓친 오차를 순차적으로 줄여 가는 방식이라 median error를 낮추는 데 도움이 되었다.
+
+| 최종 ensemble 구성 | 역할 |
+|---|---|
+| Ridge alpha 50 | 전체 예측을 안정화하고 과도한 tree 기반 변동을 완화 |
+| Extra Trees 60 | 비선형 위치 패턴과 anchor 조합의 영향을 반영 |
+| Gradient Boosting 60 | 작은 오차 구간의 정밀도를 보완 |
+
+세 모델의 결과는 단순 평균이 아니라 validation RMSE의 역수에 비례하는 가중 평균으로 결합하였다. 최종 저장된 ensemble weight는 Ridge 0.3288, Extra Trees 0.3403, Gradient Boosting 0.3309로 거의 균형 있게 분포하였다. 이는 특정 모델 하나가 압도적으로 지배하는 구조라기보다, 세 모델이 서로 비슷한 정도로 최종 좌표 추정에 기여했다는 의미로 해석할 수 있다.
+
+참고한 논문들은 UWB/RTT 기반 실내 측위에서 NLOS와 multipath가 거리 측정 오차를 키우고, 이러한 오차를 식별하거나 가중치를 조정하는 과정이 필요하다는 점을 보여준다. 다만 본 프로젝트에서는 원시 채널 정보나 LOS/NLOS 라벨이 제공되지 않았기 때문에, 논문에서 사용하는 채널 통계량을 그대로 적용하지 않았다. 대신 d_hat의 상대 순위, anchor 간 거리 차이, WLS residual, predicted anchor error를 이용해 신뢰도 정보를 간접적으로 구성하였다. 이 점이 기존 NLOS 식별 기반 WLS 논문과 본 알고리즘의 가장 큰 차이이다.
 
 ## 3. Agent AI 활용 방안
 
-Agent AI는 알고리즘을 자동으로 결정하는 도구가 아니라, 실험 설계와 구현 검토를 보조하는 도구로 사용하였다. 본인은 데이터셋을 직접 실행하고 결과를 확인하며, validation 결과를 기준으로 최종 모델을 선택하였다.
+본 실험에서 Agent AI는 알고리즘을 대신 정해 주는 도구로 사용하지 않고, 아이디어를 비교하고 구현 과정에서 놓칠 수 있는 부분을 점검하는 보조 도구로 사용하였다. 특히 중간 발표 이후 RF 기반 신뢰도 WLS 구조를 최종 데이터셋에 맞게 어떻게 바꿀지 정리하는 과정에서 여러 후보를 비교하는 데 활용하였다.
 
 | 구분 | 수행 내용 |
 |---|---|
-| 본인 역할 | README 조건 확인, 데이터 실행, 모델 성능 확인, 최종 제출 파일 검토, report 내용 최종 선택 |
-| Agent AI 활용 | 데이터 분석 항목 제안, 머신러닝 후보 모델 정리, main.py와 train.py 구조 설계 보조, report.md 초안 작성 보조 |
-| 본인 검증 방식 | 실제 DH_FR1.mat로 train.py와 main.py를 실행하여 model.pkl 생성과 p_hat shape를 확인 |
-| AI 사용 시 주의점 | AI가 제안한 구조를 그대로 제출하지 않고, README의 데이터 경로, 사용자 수 동적 처리, report 형식 제한을 다시 확인 |
-| 최종 판단 기준 | hidden test 과적합을 줄이기 위해 단일 split 최고 성능만 보지 않고 모델 복잡도, 파일 크기, 실행 시간, 일반화 가능성을 함께 고려 |
+| 본인이 직접 수행한 부분 | 데이터 구조 확인, 거리 오차 분석, anchor error prediction 구조 선택, WLS 후보 종류 결정, 모델 비교 실행, 최종 ensemble 선택 |
+| Agent AI를 활용한 부분 | 실내 측위에서 사용할 수 있는 feature 후보 정리, WLS와 머신러닝 회귀를 결합하는 방식 비교, 보고서 문장 흐름 정리, 코드 구조에서 오류가 생길 수 있는 부분 검토 |
+| 최종 판단 방식 | validation 결과와 모델 특성을 같이 보고 최종 모델을 선택하였다. RMSE가 낮은지뿐 아니라 median error, m90, max error, 모델 크기, 실행 구조도 함께 확인하였다. |
+| 반영하지 않은 부분 | 단순 Random Forest 하나만 사용하는 방식, 데이터에만 맞춘 복잡한 암기형 회귀 방식, 실제 코드와 맞지 않는 WiFi/UWB 모달리티 보정 설명은 최종 구조에서 제외하였다. |
+
+AI가 제안한 내용 중 일부는 그대로 사용하지 않았다. 예를 들어, 처음에는 Random Forest가 직접 reliability를 예측하고 그 값을 WLS weight로 사용하는 구조가 가장 단순해 보였지만, 최종 데이터에서는 18개 RTT 값과 anchor 좌표만으로 좌표를 추정해야 했기 때문에 anchor error를 예측하고 그 결과를 feature와 WLS 후보 생성에 함께 사용하는 방식이 더 자연스럽다고 판단하였다. 또한 단일 tree 모델만 사용하면 validation split에서는 좋은 결과가 나와도 위치 공간의 다른 구간에서 불안정할 수 있으므로, Ridge를 ensemble에 포함해 예측의 변동성을 줄였다.
+
+최종 정리에서는 실제 구현 흐름과 맞지 않는 내용은 제외하고, 왜 해당 feature와 모델 구조를 선택했는지가 자연스럽게 드러나도록 문장을 다시 다듬었다.
 
 ## 4. 결과 도출 & 디스커션
 
-실험은 제공된 700명 데이터를 train과 validation으로 나누어 진행하였다. validation set은 최종 모델 선택을 위한 내부 평가용으로만 사용하였다. hidden test set의 정답은 알 수 없으므로, main.py는 정답 p를 사용하지 않고 d_hat과 BS_positions, 그리고 학습된 model.pkl만 사용하여 p_hat을 반환하도록 구성하였다.
+실험은 제공된 700명 데이터를 8:2로 나누어 train 560명, validation 140명 기준으로 진행하였다. 평가지표는 예측 좌표와 정답 좌표 사이의 유클리디안 거리 오차를 기준으로 계산하였다. RMSE는 큰 오차에 민감하므로 전체 안정성을 보는 데 사용하였고, MAE와 Median error는 평균적인 위치 추정 성능을 보기 위해 함께 확인하였다. m90은 전체 사용자 중 상위 10% 수준의 큰 오차가 어느 정도인지 확인하기 위한 지표로 사용하였다.
 
 | 평가 설정 | 값 |
 |---|---:|
-| 전체 제공 사용자 수 | 700 |
-| train 비율 | 0.8 |
-| validation 비율 | 0.2 |
+| 전체 데이터 수 | 700 |
+| train 데이터 수 | 560 |
+| validation 데이터 수 | 140 |
 | anchor 수 | 18 |
+| 최종 선택 모델 | ensemble_ridge_extra_gbr |
 | 최종 model.pkl 크기 | 76.68 MB |
-| main.py 반환 shape | (2, num_user) |
 
-모델 비교 결과는 다음과 같다. 모든 수치는 같은 train/validation split에서 계산하였으며, 위치 오차는 예측 좌표와 정답 좌표 사이의 Euclidean distance로 계산하였다.
+모델 비교는 같은 feature set과 같은 train/validation split을 기준으로 수행하였다. 즉, 어떤 모델은 더 많은 정보를 사용하고 다른 모델은 적은 정보를 사용하는 방식이 아니라, 동일한 입력 feature를 두고 회귀기 구조만 다르게 비교하였다. 따라서 아래 결과는 feature 설계의 차이라기보다 최종 회귀 모델 선택에 따른 차이를 보여준다.
 
 | model | mode | RMSE | MAE | Median_error | m90 | Max_error |
 |---|---|---:|---:|---:|---:|---:|
@@ -122,40 +154,32 @@ Agent AI는 알고리즘을 자동으로 결정하는 도구가 아니라, 실�
 | knn_9_distance | single | 9.9305 | 8.3826 | 7.1581 | 15.6118 | 34.0396 |
 | knn_5_distance | single | 9.9477 | 8.3418 | 7.4357 | 14.8105 | 33.7725 |
 
-비교 결과에서 Extra Trees 계열은 RMSE가 낮고 안정적이었지만, Gradient Boosting은 Median_error와 Max_error 측면에서 장점을 보였다. Ridge는 단독 성능은 가장 좋지 않았지만, 선형적이고 과적합 위험이 낮아 ensemble에 포함했을 때 안정화 역할을 하였다. 따라서 최종 모델은 Ridge, Extra Trees, Gradient Boosting을 결합한 ensemble_ridge_extra_gbr로 선정하였다.
+가장 좋은 RMSE를 보인 모델은 Ridge, Extra Trees, Gradient Boosting을 결합한 ensemble_ridge_extra_gbr이었다. 단일 Extra Trees는 RMSE와 m90이 안정적이었고, Gradient Boosting은 Median error와 Max error에서 장점이 있었다. Ridge는 단독 성능만 보면 가장 좋은 모델은 아니지만, tree 기반 모델이 특정 영역에서 과하게 흔들리는 것을 줄여 주는 역할을 하였다. 이 때문에 최종 ensemble은 단일 모델보다 RMSE와 MAE가 낮게 나타났다.
 
-| 비교 관점 | 단일 Extra Trees | 단일 Gradient Boosting | 단일 Ridge | 최종 Ensemble |
+| 비교 항목 | Ridge alpha50 | Extra Trees 60 | Gradient Boosting | 최종 Ensemble |
 |---|---:|---:|---:|---:|
-| RMSE | 6.5447 | 6.8933 | 6.9749 | 6.3721 |
-| MAE | 4.8498 | 4.6408 | 5.3630 | 4.5244 |
-| Median_error | 3.5102 | 2.7566 | 4.0834 | 3.0303 |
-| m90 | 9.2203 | 11.2005 | 11.3608 | 9.3845 |
-| Max_error | 28.5595 | 26.8821 | 31.0842 | 28.7452 |
+| RMSE | 6.9749 | 6.5447 | 6.8933 | 6.3721 |
+| MAE | 5.3630 | 4.8498 | 4.6408 | 4.5244 |
+| Median_error | 4.0834 | 3.5102 | 2.7566 | 3.0303 |
+| m90 | 11.3608 | 9.2203 | 11.2005 | 9.3845 |
+| Max_error | 31.0842 | 28.5595 | 26.8821 | 28.7452 |
 
-이 비교는 딥러닝처럼 복잡도가 완전히 다른 모델과 단순 baseline을 불공정하게 비교하는 방식이 아니다. 모든 모델은 동일한 feature set을 사용하고, 같은 validation split에서 평가되었다. 차이는 최종 회귀기의 종류와 ensemble 여부뿐이다. 이 때문에 모델 비교 결과는 feature 설계 효과와 회귀기 선택 효과를 비교적 공정하게 보여준다.
+이 결과를 보면 Gradient Boosting은 중간값 오차가 가장 낮지만, m90은 상대적으로 크다. 즉 대부분의 샘플에서는 정밀하게 맞추지만, 일부 샘플에서 오차가 커질 수 있다는 의미이다. Extra Trees는 m90이 낮아 전체적으로 안정적이지만, Median error는 Gradient Boosting보다 높다. 최종 ensemble은 두 모델의 장점을 어느 정도 섞으면서 Ridge의 안정성을 추가한 형태이다. 최종 모델의 Median error가 Gradient Boosting 단일 모델보다 약간 커진 점은 아쉬운 부분이지만, RMSE와 MAE를 함께 고려했을 때 전체적인 균형은 ensemble이 더 좋았다.
 
-본 알고리즘의 장점은 측정 오차가 큰 anchor를 완전히 제거하지 않고 predicted error로 부드럽게 반영한다는 점이다. 또한 WLS 후보를 여러 개 만들어 ML이 기하학 기반 후보 정보를 함께 학습할 수 있도록 구성하였다. 단점은 feature 생성과 ensemble로 인해 단순 Ridge나 KNN보다 model.pkl 크기와 연산량이 크다는 점이다. 
+KNN 계열 모델은 같은 feature를 사용했음에도 RMSE가 9.9m 수준으로 높게 나타났다. 이는 단순히 가까운 학습 샘플을 찾는 방식만으로는 새로운 위치나 측정 오차 패턴을 충분히 일반화하기 어렵다는 것을 보여준다. 반대로 Ridge, Extra Trees, Gradient Boosting 계열은 모두 KNN보다 낮은 오차를 보였고, 특히 WLS 후보와 residual feature를 함께 사용했을 때 좌표 회귀 모델이 기하학적 정보를 더 잘 활용할 수 있었다.
 
-| 항목 | 만족 여부 | 확인 내용 |
-|---|---|---|
-| main.py에 main 함수 정의 | 만족 | main()이 p_hat을 반환 |
-| p_hat shape | 만족 | (2, num_user) 형태 반환 |
-| 사용자 수 하드코딩 방지 | 만족 | d_hat.shape[1] 사용 |
-| 데이터 파일명 | 만족 | DH_FR1.mat 사용 |
-| 표준 패키지 사용 | 만족 | numpy, scipy, scikit-learn, pandas만 사용 |
-| requirements.txt 필요성 | 불필요 | README 표준 패키지만 사용 |
-| model 파일 형식 | 만족 | model.pkl 사용 |
-| report.md 형식 제한 | 만족 | 코드 블록, 의사코드, 이미지 미사용 |
-| 결과 수치 표기 | 만족 | 모든 실험 결과 수치를 markdown 표로 작성 |
+본 알고리즘의 장점은 크게 세 가지이다. 첫째, 측정값이 이상하다고 판단되는 anchor를 완전히 버리지 않고 predicted error를 통해 부드럽게 반영한다. 완전 제거 방식은 특정 상황에서 필요한 anchor까지 버릴 수 있지만, 본 방식은 낮은 신뢰도를 feature와 weight에 반영하기 때문에 더 유연하다. 둘째, 하나의 WLS 결과에 의존하지 않고 여러 anchor subset에서 후보 좌표를 만들기 때문에 outlier에 의한 쏠림을 줄일 수 있다. 셋째, 선형 모델과 비선형 tree 모델을 함께 사용하여 안정성과 표현력을 동시에 확보하려고 하였다.
 
-향후 개선 방향은 validation 방식을 단일 holdout에서 spatial K-fold로 확장하는 것이다. 현재는 random split 기반이므로 위치 공간의 특정 영역이 validation에 많이 포함되는 경우 결과가 달라질 수 있다. 또한 hidden test set에서의 일반화를 더 높이기 위해 model ensemble의 구성 수를 늘리는 대신, anchor error prediction의 calibration을 개선하거나 residual이 큰 사용자에 대한 adaptive model selection을 추가할 수 있다.
+반대로 한계도 있다. feature 수가 많고 anchor error model과 여러 WLS 후보를 모두 계산하기 때문에 단순 선형 회귀나 단일 KNN보다 구조가 무겁다. 또한 validation은 random split 기준으로 진행했기 때문에, 위치 공간 전체에 대해 고르게 일반화되는지를 완전히 확인했다고 보기는 어렵다. 만약 추가 실험을 진행한다면, 좌표 공간을 구역별로 나누는 spatial K-fold 방식으로 검증하여 특정 공간 영역에 대한 일반화 성능을 더 엄격하게 확인할 필요가 있다. 또한 residual이 매우 작은 사용자에 대해서는 복잡한 ensemble까지 가지 않고 더 단순한 모델로 조기 종료하는 adaptive 구조를 적용하면 실행 시간을 줄일 수 있을 것이다.
+
+최종적으로 본 실험에서는 단순한 거리 기반 측위보다, anchor별 오차 예측과 WLS 후보 생성, ensemble 회귀를 결합한 구조가 더 안정적이라고 판단하였다. 특히 실내 RTT 측정값처럼 일부 anchor가 크게 흔들리는 데이터에서는 모든 anchor를 동일하게 믿는 방식보다, 측정값의 신뢰도와 기하학적 일관성을 함께 보는 방식이 더 적합했다.
 
 ## 5. Reference
 
-| 번호 | Reference | 신뢰도 및 핵심 내용 | 본 알고리즘에 반영한 부분 | 본 알고리즘과의 차이 |
-|---:|---|---|---|---|
-| 1 | S. Maranò, W. M. Gifford, H. Wymeersch, and M. Z. Win, NLOS Identification and Mitigation for Localization Based on UWB Experimental Data, IEEE Journal on Selected Areas in Communications, 2010. | UWB 실험 데이터 기반으로 NLOS 상황에서 ranging error가 커지고 이를 식별 및 완화해야 함을 보인 대표 IEEE 논문이다. | d_hat의 큰 오차를 단순 noise가 아니라 anchor별 신뢰도 문제로 보고 predicted error model을 설계하였다. | 논문은 UWB 실험 채널 데이터와 NLOS 식별을 직접 다루지만, 본 프로젝트는 채널 원시 정보가 없으므로 d_hat 통계와 residual로 신뢰도를 간접 추정하였다. |
-| 2 | İ. Güvenç, C. C. Chong, F. Watanabe, and H. Inamura, NLOS Identification and Weighted Least-Squares Localization for UWB Systems Using Multipath Channel Statistics, EURASIP Journal on Advances in Signal Processing, 2008. | NLOS 가능성이 있는 측정값에 낮은 WLS weight를 부여하는 localization 구조를 제안한 신뢰도 높은 논문이다. | predicted anchor error를 이용하여 신뢰도 높은 anchor subset WLS 후보를 만들고, error가 큰 anchor의 영향력을 줄였다. | 논문은 multipath channel statistics를 사용하지만, 본 프로젝트는 제공된 d_hat만 사용해야 하므로 rank, pairwise difference, WLS residual을 대체 feature로 사용하였다. |
-| 3 | F. Zafari, A. Gkelias, and K. K. Leung, A Survey of Indoor Localization Systems and Technologies, IEEE Communications Surveys & Tutorials, 2019. | ToF, RTT, RSS, fingerprinting 등 실내측위 기술을 종합적으로 정리한 IEEE survey이다. | RTT 기반 거리 측위와 fingerprinting 기반 feature regression을 결합하는 hybrid ML 구조의 근거로 활용하였다. | Survey는 다양한 기술을 개괄하지만, 본 프로젝트는 18개 RTT 측정값만 주어진 제한된 문제에 맞게 feature engineering과 compact ensemble을 구현하였다. |
-| 4 | F. Wang et al., Survey on NLOS Identification and Error Mitigation for UWB Indoor Positioning, Electronics, 2023. | UWB 실내측위에서 NLOS 식별, error mitigation, ML 기반 보정 방법을 정리한 최신 survey이다. | anchor error prediction, residual feature, outlier-aware ensemble의 필요성을 설명하는 이론적 근거로 사용하였다. | Survey는 여러 센서와 채널 정보를 다루지만, 본 프로젝트는 BS_positions와 d_hat만 사용하여 README 조건에 맞는 단일 입력 구조로 제한하였다. |
-| 5 | C. L. Sang et al., Identification of NLOS and Multi-Path Conditions in UWB Localization Using Machine Learning Methods, Applied Sciences, 2020. | UWB 환경에서 LOS, NLOS, multipath 조건을 머신러닝으로 구분하는 실험 연구이다. | anchor별 오차를 하나의 고정 bias로 보지 않고 사용자별 feature에 따라 달라지는 ML prediction 문제로 모델링하였다. | 논문은 조건 분류 문제를 다루지만, 본 프로젝트는 class label이 없으므로 predicted distance error를 회귀 문제로 변환하였다. |
+| 번호 | Reference | 본 알고리즘과 관련된 내용 | 본 알고리즘에서 다르게 적용한 점 |
+|---:|---|---|---|
+| 1 | S. Maranò, W. M. Gifford, H. Wymeersch, and M. Z. Win, “NLOS Identification and Mitigation for Localization Based on UWB Experimental Data,” IEEE Journal on Selected Areas in Communications, 2010. | UWB 실험 데이터에서 NLOS 환경이 거리 측정 오차를 키우며, 이를 식별하고 완화하는 과정이 필요함을 보였다. | 본 프로젝트에서는 채널 원시 정보가 없기 때문에 NLOS를 직접 분류하지 않고, d_hat과 anchor geometry에서 파생한 feature로 anchor별 거리 오차를 예측하였다. |
+| 2 | İ. Güvenç, C. C. Chong, F. Watanabe, and H. Inamura, “NLOS Identification and Weighted Least-Squares Localization for UWB Systems Using Multipath Channel Statistics,” EURASIP Journal on Advances in Signal Processing, 2008. | NLOS 가능성이 있는 측정값에 낮은 WLS weight를 부여하여 위치 추정의 오차를 줄이는 구조를 제안하였다. | 본 알고리즘은 multipath channel statistics 대신 predicted anchor error를 사용하고, 단일 WLS가 아니라 여러 anchor subset WLS 후보를 feature로 활용하였다. |
+| 3 | F. Zafari, A. Gkelias, and K. K. Leung, “A Survey of Indoor Localization Systems and Technologies,” IEEE Communications Surveys & Tutorials, 2019. | RTT, ToF, RSS, fingerprinting 등 실내 측위 기술의 특징과 머신러닝 기반 측위 접근을 정리하였다. | 본 프로젝트에서는 fingerprinting식 회귀와 기하학식 WLS를 분리하지 않고, WLS 후보 좌표와 residual을 머신러닝 feature로 합치는 방식으로 사용하였다. |
+| 4 | F. Wang et al., “Survey on NLOS Identification and Error Mitigation for UWB Indoor Positioning,” Electronics, 2023. | UWB 실내 측위에서 NLOS 식별, error mitigation, ML 기반 보정 방법의 흐름을 정리하였다. | 본 알고리즘은 딥러닝 기반 end-to-end 구조 대신, anchor error prediction과 WLS 후보 생성 과정을 명시적으로 두어 결과 해석이 가능하도록 구성하였다. |
+| 5 | C. L. Sang et al., “Identification of NLOS and Multi-Path Conditions in UWB Localization Using Machine Learning Methods,” Applied Sciences, 2020. | 머신러닝을 이용해 LOS, NLOS, multipath 조건을 분류하는 접근을 다루었다. | 본 데이터에는 LOS/NLOS label이 없으므로 분류 문제가 아니라 거리 오차 크기를 예측하는 회귀 문제로 바꾸어 적용하였다. |
